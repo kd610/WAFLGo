@@ -3,6 +3,8 @@
 #include "SVF-LLVM/LLVMModule.h"
 #include "Graphs/SVFG.h"
 #include "Graphs/ICFG.h"
+#include <llvm/Support/Path.h> // for llvm::sys::path::filename, etc.
+#include "llvm/Support/raw_ostream.h" // Include for raw_string_ostream
 #include "WPA/Andersen.h"
 #include "SABER/LeakChecker.h"
 #include "llvm/IR/CFG.h"
@@ -989,67 +991,103 @@ void filter_target(){
 
 
 std::vector<NodeID> loadTargets(std::string filename) {
+  // 1. read the target file
   ifstream inFile(filename);
 	if (!inFile) {
 		std::cerr << "can't open target file!" << std::endl;
 		exit(1);
 	}
-	std::vector<NodeID> result;
-	std::vector<std::pair<std::string,u32_t>> targets;
+
+  // 2. read the target line by line
+	std::vector<NodeID> result; // store the target node id
+	std::vector<std::pair<std::string,u32_t>> targets; // store the target function name and line number
 	std::string line;
 	while(getline(inFile, line)) {
 		std::string func;
 		uint32_t num;
 		std::istringstream text_stream(line);
-		getline(text_stream, func, ':');
-    if(func.empty()){
+		getline(text_stream, func, ':'); // Extract the function name (up to the ':' delimiter) into 'func'.
+    if(func.empty()){ 
       errs() << "empty\n";
       continue;
     }
-		text_stream >> num;
-    targets.push_back(make_pair(func, num));
+		text_stream >> num; // Read the line number.
+    targets.push_back(make_pair(func, num)); // add the target function name and line number
 	}
 
+  // 3. Iterating Through LLVM IR:
+  // iterate though all the functions in the module
   for (Module::const_iterator F = M->begin(), E = M->end(); F != E; ++F){
     const Function *fun = &*(F);
 		std::string file_name = "";
 		std::string Filename = "";
 
+    // Get the file name of the function if the debug info is available
 		if (llvm::DISubprogram *SP = fun->getSubprogram()){
 			if (SP->describes(fun))
 				file_name = (SP->getFilename()).str();
 		}
+
+    // 1. Check if the function's file name matches any of the targets
 		bool flag = false;
 		for (auto target : targets) {
-      auto idx = file_name.find(target.first);
+      // get the canonical file name
+      std::string TargetFileName = llvm::sys::path::filename(target.first).str();
+      auto idx = file_name.find(TargetFileName);
+      // auto idx = file_name.find(target.first); // This doesn't work because target.first is the full path...
       if (idx != string::npos) {
+        // Debug info for the function is available and its fine name
+        // matches the target file name
+        std::cout << "Function: " << fun->getName().str() << " File: " << file_name << std::endl;
 				flag = true;
 				break;
 			}
 		}
+    // If the function's file name does not match any of the targets, skip the function
 		if (!flag)
 			continue;
+
+    // Debug function name
+    std::cout << "### Current Function (passed target matching): " << fun->getName().str() << "###" << std::endl;
     
+     // Inner loop (1): Iterate through all "basic blocks" in the current function.
     for (Function::const_iterator bit = fun->begin(), ebit = fun->end(); bit != ebit; ++bit) {
 
 			const BasicBlock* bb = &(*bit);
+      // Inner loop (2): Iterate through all "instructions" in the current basic block.
 			for (BasicBlock::const_iterator it = bb->begin(), eit = bb->end(); it != eit; ++it) {
 				uint32_t line_num = 0;
 				const Instruction* inst = &(*it);
 				std::string str=LLVMUtil::getSourceLoc(inst);
+        // Debug the value of LLVMUtil::getSourceLoc(inst);
+        // Convert the instruction to a string
+        std::string inst_str;
+        llvm::raw_string_ostream rso(inst_str);
+        inst->print(rso);
+        std::cout << "Instruction: " << inst_str << " SourceLoc: " << str << std::endl;
 
+          // 4. Target Matching:
+          // Skip alloca instructions (they are not relevant for our targets).
 					if (SVFUtil::isa<AllocaInst>(inst)) {
             continue;
 					}
+          // Get debug information (line number and filename) if available.
 					else if (MDNode *N = inst->getMetadata("dbg")) {
 						llvm::DILocation* Loc = SVFUtil::cast<llvm::DILocation>(N);
 						line_num = Loc->getLine();
             Filename = Loc->getFilename().str();
 					}
 					
-					// if the line number match the one in targets
+          // Iterate through the targets read from the file.
 					for (auto target : targets) {
-						auto idx = Filename.find(target.first);
+            // Check if the current instruction's filename contains the target function name.
+            // The (idx == 0 || Filename[idx-1]=='/') part ensures that we match the whole function name
+            // and not just a part of it (e.g., we want to match "foo", not "myfoo").
+            std::string TargetFileName = llvm::sys::path::filename(target.first).str();
+            std::cout << "Filename: " << Filename << " Target: " << target.first << std::endl;
+            std::cout << "idx: " << Filename.find(TargetFileName) << std::endl;
+            auto idx = Filename.find(TargetFileName);
+						//auto idx = Filename.find(target.first);
 						if (idx != string::npos && (idx == 0 || Filename[idx-1]=='/')) {
 							if ((target.second == line_num) ) {
                 std::list<const VFGNode *> TempVFGNodes = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(inst))->getVFGNodes();
