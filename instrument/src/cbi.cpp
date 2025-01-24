@@ -6,6 +6,7 @@
 #include "WPA/Andersen.h"
 #include "SABER/LeakChecker.h"
 #include "llvm/IR/CFG.h"
+#include <llvm/Support/Path.h> // for llvm::sys::path::filename, etc.
 #include <fstream>
 #include <sstream>
 #include <ctime>
@@ -1021,7 +1022,9 @@ std::vector<NodeID> loadTargets(std::string filename) {
 		}
 		bool flag = false;
 		for (auto target : targets) {
-      auto idx = file_name.find(target.first);
+      // get the canonical file name
+      std::string TargetFileName = llvm::sys::path::filename(target.first).str();
+      auto idx = file_name.find(TargetFileName);
       if (idx != string::npos) {
 				flag = true;
 				break;
@@ -1049,7 +1052,11 @@ std::vector<NodeID> loadTargets(std::string filename) {
 					
 					// if the line number match the one in targets
 					for (auto target : targets) {
-						auto idx = Filename.find(target.first);
+            // Check if the current instruction's filename contains the target function name.
+            // The (idx == 0 || Filename[idx-1]=='/') part ensures that we match the whole function name
+            // and not just a part of it (e.g., we want to match "foo", not "myfoo").
+            std::string TargetFileName = llvm::sys::path::filename(target.first).str();
+            auto idx = Filename.find(TargetFileName);
 						if (idx != string::npos && (idx == 0 || Filename[idx-1]=='/')) {
 							if ((target.second == line_num) ) {
                 std::list<const VFGNode *> TempVFGNodes = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(inst))->getVFGNodes();
