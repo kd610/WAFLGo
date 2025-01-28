@@ -28,7 +28,7 @@ using namespace std;
 #define MAP_SIZE_POW2       16
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
 #define AFL_R(x) (random() % (x))
-#define SUF_NUM             500 
+#define SUF_NUM             50000
 #define SUF_NUM_CFG         50000 
 #define PRE_NUM_CFG         50000
 #define TARGETS_NUM         10 
@@ -780,17 +780,15 @@ void findTargetUse(SVFG *svfg, int num){
 
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
           const SVFVar *Var = RetNode->getActualRet();
-          if(Var ==NULL){
-            continue;
-          }
-          
-          const SVFValue *val = Var->getValue();
-          if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
-          }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+          if(Var != NULL){
+            const SVFValue *val = Var->getValue();
+            if(isBlacklisted(Var)){
+              SVFGNode *svfgNode = SVFVar2SVFNode(Var);
+              worklist.push(svfgNode);
+            }else{
+              const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
+              worklist.push(ARetNode);
+            }
           }
           
       }else if(const ActualINSVFGNode * AINNode = dyn_cast<ActualINSVFGNode>(treeNode)){
@@ -812,16 +810,15 @@ void findTargetUse(SVFG *svfg, int num){
           
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
           const SVFVar *Var = RetNode->getActualRet();
-          if(Var ==NULL){
-            continue;
-          }
-          const SVFValue *val = Var->getValue();
-          if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
-          }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+          if(Var != NULL) {
+            const SVFValue *val = Var->getValue();
+            if(isBlacklisted(Var)){
+              SVFGNode *svfgNode = SVFVar2SVFNode(Var);
+              worklist.push(svfgNode);
+            }else{
+              const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
+              worklist.push(ARetNode);
+            }
           }
       }
       for (VFGNode::const_iterator it = treeNode->OutEdgeBegin(), eit = treeNode->OutEdgeEnd();
@@ -850,16 +847,15 @@ void findTargetUse(SVFG *svfg, int num){
 
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
           const SVFVar *Var = RetNode->getActualRet();
-          if(Var ==NULL){
-            continue;
-          }
-          const SVFValue *SVFval = Var->getValue();
-          if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
-          }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+          if(Var != NULL) {
+            const SVFValue *SVFval = Var->getValue();
+            if(isBlacklisted(Var)){
+              SVFGNode *svfgNode = SVFVar2SVFNode(Var);
+              worklist.push(svfgNode);
+            }else{
+              const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
+              worklist.push(ARetNode);
+            }
           }
         }else if(FormalRetVFGNode * FRetNode = dyn_cast<FormalRetVFGNode>(sufNode)){
           FunEntryICFGNode *funEntryNode = icfg->getFunEntryICFGNode(FRetNode->getFun());
@@ -883,16 +879,15 @@ void findTargetUse(SVFG *svfg, int num){
           
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
           const SVFVar *Var = RetNode->getActualRet();
-          if(Var ==NULL){
-            continue;
-          }
-          const SVFValue *val = Var->getValue();
-          if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
-          }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+          if(Var !=NULL) {
+            const SVFValue *val = Var->getValue();
+            if(isBlacklisted(Var)){
+              SVFGNode *svfgNode = SVFVar2SVFNode(Var);
+              worklist.push(svfgNode);
+            }else{
+              const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
+              worklist.push(ARetNode);
+            }
           }
 
         }else if(FormalOUTSVFGNode * FOUTNode=dyn_cast<FormalOUTSVFGNode>(sufNode)){
