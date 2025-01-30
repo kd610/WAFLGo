@@ -5,6 +5,7 @@
 #include "Graphs/ICFG.h"
 #include <llvm/Support/Path.h> // for llvm::sys::path::filename, etc.
 #include "llvm/Support/raw_ostream.h" // Include for raw_string_ostream
+#include "llvm/Support/raw_os_ostream.h"
 #include "WPA/Andersen.h"
 #include "SABER/LeakChecker.h"
 #include "llvm/IR/CFG.h"
@@ -392,66 +393,95 @@ void instrumentSuffix() {
 }
 
 void findTargetControl(std::vector<NodeID> x){
-
+    
+    // Sets to keep track of visited nodes during predecessor and successor traversals
     set<const ICFGNode *> isvisited_pre;
     set<const ICFGNode *> isvisited_suf;
 
+  // Iterate through the basic blocks that are targets (targets_DT_bb)
+  std::cout << "--- Searching for control flow paths to targets in findTargetControl ---" << std::endl;
   for(const BasicBlock* BB:targets_DT_bb){
+    // Print out BB's id 
+    std::cout << "BB from targets_DT_bb: " << BB_IDs[BB] << std::endl;
+
+    // Get the last instruction in the basic block
     const Instruction *lastInstr = BB->getTerminator();
     
+    // Get the corresponding ICFGNode for the last instruction
     NodeID id = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(lastInstr))->getId();
     ICFGNode *iNode = icfg->getICFGNode(id);
+    // Retrieve the corresponding SVFBasicBlock and LLVM BasicBlock
     const SVFBasicBlock *svfbb = iNode->getBB();
     const BasicBlock *BB_target = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
+
+    // Get the unique BB ID of the target basic block
     uint32_t taget_bb_id = BB_IDs[BB_target];
 
+    std::cout << "Target BB ID: " << taget_bb_id << std::endl;
+
+    // Flags to control predecessor and successor exploration
     bool sufFlag = 1;   
     bool preFlag = 1;
+
+    // Check if the node has already been visited during forward traversal
     if(isvisited_suf.find(iNode)!=isvisited_suf.end()){
-      sufFlag = 0;
+      sufFlag = 0; // If visited, skip forward traversal
     }else{
-      isvisited_suf.clear();
+      isvisited_suf.clear(); // Otherwise, clear the visited set for a fresh forward traversal
     }
 
+    // Check if the node has already been visited during backward traversal
     if(isvisited_pre.find(iNode)!=isvisited_pre.end()){
-      isvisited_pre.clear();
+      isvisited_pre.clear(); // Always clear for backward traversal, regardless of prior visits in this loop's iteration.
     }else{
       isvisited_pre.clear();
     }
 
+    // Temporary sets to store predecessor and forward (successor) traversal (BFS)
     std::set<const BasicBlock*> tmp_pre_bbs;
     std::set<const BasicBlock*> tmp_suf_bbs;
 
+    // Worklists for backward (predecessor) and successor traversal
     FIFOWorkList<const ICFGNode *> worklist;
     FIFOWorkList<const SVF::ICFGNode *> worklist_suf;
+
+    // Initialize worklists and maps for backward exploration
     worklist.push(iNode);
+     // Initialize maps to store distances from target to predecessor nodes/basic blocks
     targetID2preNodeMap[taget_bb_id][iNode] = 0;
     targetID2preNodeMapBB[taget_bb_id][BB] = 0;
+    // Add the initial basic block to the temporary set for backward traversal
     tmp_pre_bbs.insert(BB);
+
+    // Initialize the forward worklist with the current ICFG node
     worklist_suf.push(iNode);
 
+    // Sets to track caller nodes and functions
     set<const ICFGNode *> caller;
     set<const SVFFunction *> caller_func;
 
+    // Counter for predecessor exploration
     int pre_num_cfg = 0;
 
+    // Backward traversal () predecessor from the target node
     while(!worklist.empty() && preFlag && (pre_num_cfg<PRE_NUM_CFG)){
       pre_num_cfg++;
-      const ICFGNode *iNode = worklist.pop();
-      isvisited_pre.insert(iNode);
+      const ICFGNode *iNode = worklist.pop(); // Get the next node from the worklist
+      isvisited_pre.insert(iNode); // Mark the node as visited
 
       const BasicBlock *nowBB = NULL;
       if(iNode->getBB()){
+        // Get the LLVM BasicBlock corresponding to the current ICFG node
         nowBB = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(iNode->getBB()));
       }
 
-      for(ICFGNode::const_iterator it = iNode->InEdgeBegin(), eit =
-                                                                        iNode->InEdgeEnd();
-           it != eit; ++it)
+      // Iterate through the predecessors of the current node
+      for(ICFGNode::const_iterator it = iNode->InEdgeBegin(), eit = iNode->InEdgeEnd(); it != eit; ++it)
       {
         ICFGEdge *edge = *it;
-        ICFGNode *preNode = edge->getSrcNode();
+        ICFGNode *preNode = edge->getSrcNode(); // Get the predecessor node
 
+         // If the predecessor has already been visited, skip it
         if(isvisited_pre.find(preNode) != isvisited_pre.end()){
           continue;
         }
@@ -461,111 +491,138 @@ void findTargetControl(std::vector<NodeID> x){
         const BasicBlock *preBB = NULL;
 
         if(preNode->getBB()){
+          // Get the LLVM BasicBlock corresponding to the predecessor ICFG node
           preBB = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(preNode->getBB()));
         }
 
-        if(RetICFGNode * retNode = dyn_cast<RetICFGNode>(preNode)){
-          const ICFGNode *callICFGNode = retNode->getCallICFGNode();
-          worklist.push(callICFGNode);
+        // Handle return nodes (special case for inter-procedural analysis), if the predecessor is a return node (RetICFGNode).
+        if(RetICFGNode * retNode = dyn_cast<RetICFGNode>(preNode)){ 
+          const ICFGNode *callICFGNode = retNode->getCallICFGNode(); // Get the corresponding call node
+          worklist.push(callICFGNode); // Add the call node to the worklist
           if(callICFGNode->getBB()){
+            // Get the LLVM BasicBlock of the call site
             callBB = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(callICFGNode->getBB()));
           }
 
+          // Update distance to call site BB
           if(callBB == nowBB){
-            ;
-          }else if(targetID2preNodeMapBB[taget_bb_id].count(callBB)){
+            ; // Same BB, no distance change
+          }else if(targetID2preNodeMapBB[taget_bb_id].count(callBB)){ // 1 if callBB exists in the map by count().
+            // If callBB already in map, take the minimum distance.
+            // E.g., if a new distance (adding 1, one step further aways from the target node) is shoter than the current distance, update the map with the new distance.
+            // Otherwise, keep the existing distance.
             targetID2preNodeMapBB[taget_bb_id][callBB] = targetID2preNodeMapBB[taget_bb_id][nowBB] + 1 < targetID2preNodeMapBB[taget_bb_id][callBB] ? targetID2preNodeMapBB[taget_bb_id][nowBB] + 1 : targetID2preNodeMapBB[taget_bb_id][callBB];
 
           }else{
+            // Otherwise, add callBB to map with distance from current BB + 1
             targetID2preNodeMapBB[taget_bb_id][callBB] = targetID2preNodeMapBB[taget_bb_id][nowBB] + 1;
           }
-          for(ICFGNode::const_iterator it = retNode->InEdgeBegin(), eit =
-                                                                          retNode->InEdgeEnd();
-            it != eit; ++it)
+
+          // Iterate through predecessors of the return node to identify caller functions
+          for(ICFGNode::const_iterator it = retNode->InEdgeBegin(), eit = retNode->InEdgeEnd(); it != eit; ++it)
           {
             ICFGEdge *edge = *it;
             FunExitICFGNode *FunExitNode = NULL;
             if(FunExitNode = dyn_cast<FunExitICFGNode>(edge->getSrcNode())) {
+              // If predecessor is a function exit node, add the call site and function to caller sets
               caller.insert(callICFGNode);
               caller_func.insert(FunExitNode->getFun());
             }
           }
         }
+        // Handle call nodes (special case for inter-procedural analysis)
         else if(CallICFGNode* callICFGNode= dyn_cast<CallICFGNode>(preNode)){
+          // if the predecessor is a call node, 
           if(caller_func.count(iNode->getFun())){
+            // If the caller function is already in the set, skip the call node
             if(caller.find(callICFGNode) == caller.end()){
               continue;
             }
           }
         }
+
+        // Add the predecessor to the worklist for further exploration
         worklist.push(preNode);
         
+        // Update distance to predecessor BB
         if(preBB == nowBB){
-          ;
+          ; // Same BB, no distance change
         }else if(targetID2preNodeMapBB[taget_bb_id].count(preBB)){
+          // If preBB already in map, take minimum distance
           targetID2preNodeMapBB[taget_bb_id][preBB] = targetID2preNodeMapBB[taget_bb_id][nowBB] + 1 < targetID2preNodeMapBB[taget_bb_id][preBB] ? targetID2preNodeMapBB[taget_bb_id][nowBB] + 1 : targetID2preNodeMapBB[taget_bb_id][preBB];
         }else{
+          // Otherwise, add preBB to map with distance from current BB + 1
           targetID2preNodeMapBB[taget_bb_id][preBB] = targetID2preNodeMapBB[taget_bb_id][nowBB] + 1;
         }
         
       }
     }
 
+    // If backward traversal was performed (preFlag is true)
     if(preFlag){
       /// Collect all LLVM Values
       for(auto it = isvisited_pre.begin(), eit = isvisited_pre.end(); it!=eit; ++it)
       {
         const ICFGNode *node = *it;
         const IntraICFGNode *intraNode = NULL;
+        // Check if the node is an intra-procedural node
         if (intraNode= dyn_cast<IntraICFGNode>(node)){
-
+          // Get the LLVM Instruction and its BasicBlock
           const Instruction *inst = cast<const Instruction>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(intraNode->getInst()));
           if (inst)
           {
             const BasicBlock *BB = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(intraNode->getBB()));
-
+            // Add the BasicBlock to the temporary set
             tmp_pre_bbs.insert(BB);
           }
         }
       }
-
+      // Update the set of predecessor basic blocks for the current target
       targets_pre_cfg_bb[taget_bb_id].insert(tmp_pre_bbs.begin(), tmp_pre_bbs.end());
+      // Update the global set of all predecessor basic blocks
       all_pre_cfg_bb.insert(tmp_pre_bbs.begin(), tmp_pre_bbs.end());
     }
 
-
+    // Set to track callee functions during forward traversal
     set<FunEntryICFGNode *> callee;
 
+    // Counter for the number of forward traversal steps (limited by SUF_NUM_CFG)
     int suf_num_cfg = 0;
 
+    // Forward traversal (BFS) from the target node
     while(!worklist_suf.empty() && sufFlag &&(suf_num_cfg<SUF_NUM_CFG)){
       suf_num_cfg++;
-      const ICFGNode *iNode = worklist_suf.pop();
-      isvisited_suf.insert(iNode);
+      const ICFGNode *iNode = worklist_suf.pop();// Get the next node from the worklist
+      isvisited_suf.insert(iNode); // Mark the node as visited
+
+      // Handle call nodes (special case for inter-procedural analysis)
       if(const CallICFGNode * callNode = dyn_cast<const CallICFGNode>(iNode)){
-        worklist_suf.push(callNode->getRetICFGNode());
-        for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
-                                                                          callNode->OutEdgeEnd();
-            it != eit; ++it)
+        worklist_suf.push(callNode->getRetICFGNode()); // Add the return node to the worklist
+
+        // Iterate through successors of the call node to identify callee functions
+        for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit = callNode->OutEdgeEnd(); it != eit; ++it)
         {
           ICFGEdge *edge = *it;
-            FunEntryICFGNode *FunEntryNode = NULL;
-            if(FunEntryNode = dyn_cast<FunEntryICFGNode>(edge->getDstNode())) {
-              callee.insert(FunEntryNode);
-            }
+          FunEntryICFGNode *FunEntryNode = NULL;
+          if(FunEntryNode = dyn_cast<FunEntryICFGNode>(edge->getDstNode())) {
+            // If successor is a function entry node, add it to the callee set
+            callee.insert(FunEntryNode);
+          }
         }
 
       }
-      for(ICFGNode::const_iterator it = iNode->OutEdgeBegin(), eit =
-                                                                        iNode->OutEdgeEnd();
-           it != eit; ++it)
+      // Iterate through the successors of the current node - using OutEdgeBegin() and OutEdgeEnd() to get the successors
+      for(ICFGNode::const_iterator it = iNode->OutEdgeBegin(), eit = iNode->OutEdgeEnd(); it != eit; ++it)
       {
         ICFGEdge *edge = *it;
-        ICFGNode *sufNode = edge->getDstNode();
+        ICFGNode *sufNode = edge->getDstNode(); // Get the successor node
 
+        // If the successor has already been visited, skip it
         if(isvisited_suf.find(sufNode) != isvisited_suf.end()){
           continue;
         }
+
+        // Handle call nodes (similar to above)
         if(CallICFGNode * callNode = dyn_cast<CallICFGNode>(sufNode)){
           worklist_suf.push(callNode->getRetICFGNode());
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
@@ -579,36 +636,43 @@ void findTargetControl(std::vector<NodeID> x){
             }
           }
 
-        }else if(FunExitICFGNode* funExitNode = dyn_cast<FunExitICFGNode>(sufNode)){
+        }
+        // Handle function exit nodes that corresponds to a return statement (or the implicit return at the end of a void function).
+        else if(FunExitICFGNode* funExitNode = dyn_cast<FunExitICFGNode>(sufNode)){
           FunEntryICFGNode *funEntryNode = icfg->getFunEntryICFGNode(funExitNode->getFun());
           if(callee.find(funEntryNode)!=callee.end()){
             continue;
           }
         }
+        // Add the successor to the worklist for further exploration
         worklist_suf.push(sufNode);
 
       }
     }
 
+    // If forward traversal was performed (sufFlag is true)
     if(sufFlag){
       /// Collect all LLVM Values
       for(auto it = isvisited_suf.begin(), eit = isvisited_suf.end(); it!=eit; ++it)
       {
         const SVF::ICFGNode *node = *it;
         const SVF::IntraICFGNode *intraNode = NULL;
+        // Check if the node is an intra-procedural node
         if (intraNode= dyn_cast<SVF::IntraICFGNode>(node)){
-
+          // Get the LLVM Instruction and its BasicBlock
           const Instruction *inst = cast<const Instruction>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(intraNode->getInst()));
           if (inst)
           {
             const BasicBlock *BB = (BasicBlock*)inst->getParent();
+            // Add the BasicBlock to the temporary set
             tmp_suf_bbs.insert(BB);
           }
         }
 
       }
-
+      // Update the set of successor basic blocks for the current target
       targets_suf_cfg_bb[taget_bb_id].insert(tmp_suf_bbs.begin(), tmp_suf_bbs.end());
+      // Update the global set of all successor basic blocks
       all_suf_cfg_bb.insert(tmp_suf_bbs.begin(), tmp_suf_bbs.end());
     }
    
@@ -617,52 +681,70 @@ void findTargetControl(std::vector<NodeID> x){
 
   ofstream outfile("targetBB_dis_sep.txt", std::ios::out | std::ios::app);
   ofstream outfile1("BBtargetBB_dis_sep.txt", std::ios::out | std::ios::app);
+  // Sets to store IDs and LLVM BasicBlocks for the target basic blocks
   std::set<uint32_t> targetBBIDs;
   std::set<const BasicBlock *> targetBBs;
 
+  // Iterate through the target basic blocks and collect their IDs and LLVM BasicBlocks
   for(const BasicBlock* BB:targets_DT_bb){
+     // Get the first instruction of the BasicBlock
     const Instruction *firstInstr = &*(BB->begin());
     NodeID id = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(firstInstr))->getId();
     
-      ICFGNode* iNode = icfg->getICFGNode(id);
-    
-      const SVFBasicBlock *svfbb = iNode->getBB();
-      const BasicBlock *BB_target = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
-      uint32_t taget_bb_id = BB_IDs[BB_target];
-      targetBBIDs.insert(taget_bb_id);
-      targetBBs.insert(BB_target);
+    // Retrieve the ICFGNode for the NodeID
+    ICFGNode* iNode = icfg->getICFGNode(id);
+    // Retrieve the SVFBasicBlock and LLVM BasicBlock corresponding to the ICFGNode
+    const SVFBasicBlock *svfbb = iNode->getBB();
+    const BasicBlock *BB_target = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
+    uint32_t taget_bb_id = BB_IDs[BB_target];
+    targetBBIDs.insert(taget_bb_id);
+    targetBBs.insert(BB_target);
   }
 
-  
+  // Iterate through ALL predecessor basic blocks to compute and write distances
   for(auto BB : all_pre_cfg_bb){
-    uint32_t BBID = BB_IDs[BB];
-    outfile1 << BBID <<" : ";
+    uint32_t BBID = BB_IDs[BB]; // Get the unique ID for the current BasicBlock
+    outfile1 << BBID <<" : "; // Write the ID to the output file
+
+    // Iterate through all target BasicBlocks
     for(auto BB_target : targetBBs ){
-      uint32_t taget_bb_id = BB_IDs[BB_target];
+      uint32_t taget_bb_id = BB_IDs[BB_target]; // Get the unique ID for the target BasicBlock
+
+      // Check if the current BasicBlock is in the distance map for the target
       if(targetID2preNodeMapBB[taget_bb_id].count(BB)){
+        // Update the harmonic mean map with the distance
         if(HMpreNodeMapBB.count(BB)){
+          // If either value is 0, the harmonic mean is 0
           if(HMpreNodeMapBB[BB]==0 || targetID2preNodeMapBB[taget_bb_id][BB]==0){
             HMpreNodeMapBB[BB]=0;
           }else{
+            // Update using harmonic mean formula
             HMpreNodeMapBB[BB] = (double)2 / (((double)1 / targetID2preNodeMapBB[taget_bb_id][BB]) + ((double)1 / (HMpreNodeMapBB[BB])));
           }
         }else{
+          // If not in the map, initialize the harmonic mean map with the current distance
           HMpreNodeMapBB[BB] = targetID2preNodeMapBB[taget_bb_id][BB];
         }
-
+        // Write the distance to the target to the output file
         outfile1 << " " << targetID2preNodeMapBB[taget_bb_id][BB];
       }else{
+        // If no distance is recorded, write "None"
         outfile1 << " None";
       }
     }
+    // Write the harmonic mean distance for the current BasicBlock
     outfile1 <<" "<< HMpreNodeMapBB[BB] << std::endl;
   }
 
+  // Write distances between target BasicBlocks and their predecessors
   for(auto BB_target : targetBBs ){
-    uint32_t taget_bb_id = BB_IDs[BB_target];
+    uint32_t taget_bb_id = BB_IDs[BB_target]; // Get the unique ID for the target BasicBlock
+    // Iterate through all predecessor BasicBlocks
     for(auto BB : all_pre_cfg_bb){
-      uint32_t BBID = BB_IDs[BB];
+      uint32_t BBID = BB_IDs[BB]; // Get the unique ID for the predecessor BasicBlock
+       // Check if the distance is recorded in the map
       if(targetID2preNodeMapBB[taget_bb_id].count(BB)){
+        // Write the target ID, predecessor ID, and distance to the output file
         outfile<<taget_bb_id<<" "<<BBID<<" "<<targetID2preNodeMapBB[taget_bb_id][BB]<<std::endl;
       }
     }
@@ -673,24 +755,26 @@ void findTargetControl(std::vector<NodeID> x){
 }
 
 SVFGNode * SVFVar2SVFNode(const SVFVar *Var){
-  const SVFValue *val = Var->getValue();
-  uint32_t totalNodeNum = svfg->getTotalNodeNum();
+  const SVFValue *val = Var->getValue(); // Get the LLVM Value associated with the SVFVar.
+  uint32_t totalNodeNum = svfg->getTotalNodeNum(); // Get the total number of nodes in the SVFG.
   SVF::SVFGNode *vNode;
+
+  // Iterate through all the nodes in the SVFG
   for (uint32_t i = 0; i < totalNodeNum; i++)
   {
-    if (!svfg->hasSVFGNode(i))
+    if (!svfg->hasSVFGNode(i)) // Check if the node at the index i exists
     {
       errs() << "i num: " << i << "\n";
       break;
     }
-    vNode = svfg->getSVFGNode(i);
-    if (vNode->getValue() == val)
+    vNode = svfg->getSVFGNode(i); // Get the SVFGNode at index i
+    if (vNode->getValue() == val) // Compare the value of the SVFGNode with the value of the SVFVar
     {
-      break;
+      break; // If the values match, this is the corresponding SVFGNode, so we exit the loop.
     }
   }
 
-  return vNode;
+  return vNode; // Return the found SVFGNode
 }
 
 bool isBlacklisted(const SVFVar * Var ) {
@@ -734,89 +818,146 @@ bool isBlacklisted(const SVFVar * Var ) {
 }
 
 void findTargetUse(SVFG *svfg, int num){
+  // Initialize a FIFO worklist to store VFGNodes for processing.
     FIFOWorkList<const VFGNode *> worklist;
+    // Initialize a set to keep track of visited VFGNodes.
     set<const VFGNode*> visited;
 
+  // Iterate through a collection of VFGNodes (presumably a global or member variable).
   for(auto val : VFGNodes){
+    // Cast the current node to an SVFG (sparse value flow graph) node.
     SVFGNode *vNode = (SVFGNode *)val;
+
+    // Flag to indicate whether the current node satisfies certain conditions (sufficiency).
+    // NOTE: It is initialized to 'true' but never changed in the given code (might be used in extended logic).
     bool sufFlag = 1;   
+    
+    // Check if the node has already been visited in a previous outer loop iteration.
     if(visited.find(vNode)!=visited.end()){
-      ;
+      ; // If visited before, skip processing.
     }else{
       visited.clear();
     }
 
+    // Debug: print out the val by std::cout
+    std::cout << "val: " << vNode->toString() << std::endl;
+
+    // Add the current node to the worklist to explore.
     worklist.push(vNode);
 
+    // Get the ICFGNode corresponding to the current VFGNode.
     const ICFGNode* iNode = val->getICFGNode();
+    // Get the SVFBasicBlock associated with the ICFGNode.
     const SVFBasicBlock *svfbb = iNode->getBB();
+    // Get the LLVM BasicBlock corresponding to the SVFBasicBlock.
     const BasicBlock *BB_target = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
+     // Get the unique ID of the target BasicBlock.
     uint32_t taget_bb_id = BB_IDs[BB_target];
 
+    // Temporary set to store BasicBlocks related to the current node.
     std::set<const BasicBlock*> tmp_suf_bbs;
+    // Set to store callees encountered during traversal.
     set<FunEntryICFGNode *> callee;
 
     int suf_num = 0;
 
+    // Inner loop: Process nodes from the worklist until it's empty, 
+    // sufFlag is false, or the iteration limit (SUF_NUM) is reached.
     while(!worklist.empty() && sufFlag && (suf_num<SUF_NUM)){
       suf_num++;
+
+      // Pop the next node from the worklist.
       const VFGNode *treeNode = worklist.pop();
-      
+      // Mark the current node as visited.
       visited.insert(treeNode);
+
+      // Check if the node is an Actual Parameter Node (ActualParmVFGNode).
+      // Actual Parameter Node represents an actual arguemnt at a call site. 
+      // For instance, if we have 'x = 5; func(&x);' ActualParmVFGNode captures the address of x.
       if(const ActualParmVFGNode* AParmNode=dyn_cast<ActualParmVFGNode>(treeNode)){
-          const CallICFGNode *callNode = AParmNode->getCallSite();
-          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
-                                                                          callNode->OutEdgeEnd();
-            it != eit; ++it)
+          const CallICFGNode *callNode = AParmNode->getCallSite(); // Get the call site associated with the ActualParmVFGNode
+
+          // Iterate through all out-edges of the call node to identify the callee functions.
+          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit = callNode->OutEdgeEnd(); it != eit; ++it)
           {
+            // Get the destination node (function entry) of the outgoing edge.
             ICFGEdge *edge = *it;
             FunEntryICFGNode *FunEntryNode = (FunEntryICFGNode *) edge->getDstNode();
-            callee.insert(FunEntryNode);
+            callee.insert(FunEntryNode); // Add the callee (function entry) to the 'callee' set.
           }
+
+          // Get the set of Actual OUT nodes connected to the call site in the SVFG.
+          // For example, if the call site is func(&x) and the value of x is modified in the function,
+          // and the function also assigned a new value to one of the global variables, the Actual OUT nodes
+          // would include the SVFG nodes representing the global variable and x.
           NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
+          // Add the Actual OUT nodes to the worklist for further exploration.
           for (auto nodeid : AOUTNodeSet)
           {
             worklist.push(svfg->getSVFGNode(nodeid));
           }
 
+          // Get the return node associated with the call site.
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
-          const SVFVar *Var = RetNode->getActualRet();
+          const SVFVar *Var = RetNode->getActualRet(); // Get the variable associated with the return node.
+
+          // If no variable is associated (e.g., void return), there's nothing to follow up.
           if(Var ==NULL){
             continue;
           }
           
+          // Get the value associated with the variable.
           const SVFValue *val = Var->getValue();
+          // Check if the variable is blacklisted, i.e., the return value (Var) originates from a function that is considered uninteresting or irrelevant,
+          // for example, malloc, strcpy, etc. And if so, add the corresponding SVFGNode that represents the pointer it "returns" (e.g., the allocated memory).
+          // And track how it's used in the rest of the program. (i.e, continues to analyze how that pointer (returned from the blacklisted function) is used in the program.)
           if(isBlacklisted(Var)){
             SVFGNode *svfgNode = SVFVar2SVFNode(Var);
             worklist.push(svfgNode);
           }else{
+            // Otherwise, get the Actual Return VFGNode associated with the variable.
+            // We want to coninue our analysis inside this function to see how the return value was used/computed. 
             const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
             worklist.push(ARetNode);
           }
-          
+      
+      // Check if the node is an Actual IN Node (ActualINSVFGNode). 
+      // An ActualINSVFGNode corresponds to the argument's flow *into* the callee function at this call site. 
+      // For example, if we call 'foo(&x)', the ActualINSVFGNode represents how '&x' is now seen by 'foo' as its incoming parameter.
+      // I,e., ActualINSVFGNode = "the data-flow node inside the callee environment representing the actual parameter at the call site."
+      // NOTE: SVF uses ActualParmVFGNode <-> ActualINSVFNode <-> FormalParmVFGNode to represent that entire chain of data flow.
       }else if(const ActualINSVFGNode * AINNode = dyn_cast<ActualINSVFGNode>(treeNode)){
+          // Retrieve the call site associated with the ActualINSVFGNode.
           const CallICFGNode *callNode = AINNode->getCallSite();
-          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
-                                                                          callNode->OutEdgeEnd();
-            it != eit; ++it)
+
+          // Iterate through all out-edges of the call node to identify the callee functions.
+          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit = callNode->OutEdgeEnd(); it != eit; ++it)
           {
+            // Get the destination node (function entry) of the outgoing edge.
             ICFGEdge *edge = *it;
             FunEntryICFGNode *FunEntryNode = (FunEntryICFGNode *) edge->getDstNode();
             callee.insert(FunEntryNode);
             // break;
           }
 
+          // Get the set of Actual OUT nodes connected to the call site in the SVFG.
+          // For further details, see the comments in the ActualParmVFGNode section above.
           NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
           for(auto nodeid : AOUTNodeSet){
             worklist.push(svfg->getSVFGNode(nodeid));
           }
           
+          // Get the return node associated with the call site.
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
-          const SVFVar *Var = RetNode->getActualRet();
+          const SVFVar *Var = RetNode->getActualRet(); // Get the variable associated with the return node.
+           // If no variable is associated (e.g., void return), there's nothing to follow up.
           if(Var ==NULL){
             continue;
           }
+
+          // Get the value associated with the variable.
           const SVFValue *val = Var->getValue();
+          // Check if the variable is blacklisted. See further details in the ActualParmVFGNode section above.
           if(isBlacklisted(Var)){
             SVFGNode *svfgNode = SVFVar2SVFNode(Var);
             worklist.push(svfgNode);
@@ -825,19 +966,21 @@ void findTargetUse(SVFG *svfg, int num){
             worklist.push(ARetNode);
           }
       }
-      for (VFGNode::const_iterator it = treeNode->OutEdgeBegin(), eit = treeNode->OutEdgeEnd();
-           it != eit; ++it)
+
+      // Process all out-edges from the current VFGNode to continue BFS.
+      for (VFGNode::const_iterator it = treeNode->OutEdgeBegin(), eit = treeNode->OutEdgeEnd(); it != eit; ++it)
       {
         VFGEdge *edge = *it;
         VFGNode *sufNode = edge->getDstNode();
+
+         // If we've already visited this node, skip enqueuing it again.
         if(visited.find(sufNode) != visited.end()){
           continue;
         }
+        // Handling other special node types similarly to the ActualParmVFGNode and ActualINSVFGNode above...
         if(ActualParmVFGNode* AParmNode=dyn_cast<ActualParmVFGNode>(sufNode)){
           const CallICFGNode *callNode = AParmNode->getCallSite();
-          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
-                                                                          callNode->OutEdgeEnd();
-            it != eit; ++it)
+          for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit = callNode->OutEdgeEnd(); it != eit; ++it)
           {
             ICFGEdge *edge = *it;
             FunEntryICFGNode *FunEntryNode = (FunEntryICFGNode *) edge->getDstNode();
@@ -862,11 +1005,16 @@ void findTargetUse(SVFG *svfg, int num){
             const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
             worklist.push(ARetNode);
           }
+        // FormalRetVFGNode = Represents the return value inside the callee.
+        // I.e., If we have already recognized that function as a callee (e.g., from the ActualParmVFGNode or ActualINSVFGNode),
+        // then skip further processing of the return value.
         }else if(FormalRetVFGNode * FRetNode = dyn_cast<FormalRetVFGNode>(sufNode)){
           FunEntryICFGNode *funEntryNode = icfg->getFunEntryICFGNode(FRetNode->getFun());
+          // that callee has already been discovered, skip further processing.
           if(callee.find(funEntryNode)!=callee.end()){
             continue;
           }
+        // See the comments in the ActualParmVFGNode section above.
         }else if(ActualINSVFGNode * AINNode = dyn_cast<ActualINSVFGNode>(sufNode)){
           const CallICFGNode *callNode = AINNode->getCallSite();
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
@@ -895,9 +1043,12 @@ void findTargetUse(SVFG *svfg, int num){
             const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
             worklist.push(ARetNode);
           }
-
+        // FormalRetVFGNode = Representation of changes made to the callee's parameters before returning.
+        // I.e., it tracks the data flow out of a function through pointer parameters and global variables 
+        // that are modified inside the callee function.
         }else if(FormalOUTSVFGNode * FOUTNode=dyn_cast<FormalOUTSVFGNode>(sufNode)){
           FunEntryICFGNode *funEntryNode = icfg->getFunEntryICFGNode(FOUTNode->getFunExitNode()->getFun());
+          // Skip if the function was already known as a callee.
           if(callee.find(funEntryNode)!=callee.end()){
             continue;
           }
@@ -906,25 +1057,36 @@ void findTargetUse(SVFG *svfg, int num){
       }
     }
 
+    // If the BFS path was "sufficient" (NOTE: sufFlag 'never' turned false),
+    // record all the BasicBlocks encountered from the visited VFGNodes.
     if(sufFlag){
       for(auto it = visited.begin(), eit = visited.end(); it!=eit; ++it)
       {
         const VFGNode *node = *it;
         const StmtVFGNode *stmtNode = NULL;
+        // StmtVFGNode corresponds to an LLVM instruction or statement.
         if (stmtNode= dyn_cast<StmtVFGNode>(node)){
           if(stmtNode->getInst() == nullptr){
             continue;
           }
+          // Convert the SVF instruction to an LLVM instruction, then retrieve its parent BB.
           const Instruction *inst = cast<const Instruction>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(stmtNode->getInst()));
           
           if (inst)
           {
+            // Get the parent BB of the instruction.
+            // A parent BB is a BasicBlock that contains the instruction.
             const BasicBlock *BB = (BasicBlock*)inst->getParent();
+            // tmp_suf_bbs is the set of LLVM BB that the analysis above encountered. or deemed "relevant"
+            // I.e., because these is some data-flow path into thse blocks stemming from the target BB (starting point).
             tmp_suf_bbs.insert(BB);
           }
         }
       }
+      // Store all discovered BB that are data-flow dependent, tainted, or relevant to the target BB.
+      // Hence, we can use targets_suf_data_bb to look up "from that target BB, which BBs did we discover to be reachable or to contain relevant data-flow paths."
       targets_suf_data_bb[taget_bb_id].insert(tmp_suf_bbs.begin(), tmp_suf_bbs.end());
+      // a global set that contains every discovered block from all targets.
       all_suf_data_bb.insert(tmp_suf_bbs.begin(), tmp_suf_bbs.end());
     }
 
@@ -934,8 +1096,15 @@ void findTargetUse(SVFG *svfg, int num){
 
 const BasicBlock *getDominatorBB(const Function* fun, std::set<const BasicBlock *> BBs)
 {
+  // print out the function name
+  errs() << "Processing function: " << fun->getName().str() << "\n";
+
   // Build the dominator tree for this function
+  // Dominator Tree is a data structure that consists of dominator information for each basic block in the function.
   const DominatorTree DT(const_cast<Function&>(*fun));
+  
+  // Debug - print out the dominator tree
+  DT.print(errs());
 
   // Find the common dominator of the given basic blocks
   const BasicBlock *DominatorBB = nullptr;
@@ -943,6 +1112,7 @@ const BasicBlock *getDominatorBB(const Function* fun, std::set<const BasicBlock 
   for (auto it = BBs.begin(); it != BBs.end(); it++) {
     const BasicBlock *BB = *it;
 
+    // Skip unreachable basic blocks from the dominator tree
     if (!DT.isReachableFromEntry(BB))
     {
       ;
@@ -951,6 +1121,8 @@ const BasicBlock *getDominatorBB(const Function* fun, std::set<const BasicBlock 
         DominatorBB = BB;
       } else {
         DominatorBB = DT.findNearestCommonDominator(DominatorBB, BB);
+        // Debug - print out the dominator basic block's id
+        errs() << "DominatorBB: " << DT.getNode(DominatorBB);
       }
     }
   }
@@ -958,25 +1130,44 @@ const BasicBlock *getDominatorBB(const Function* fun, std::set<const BasicBlock 
   if(!DominatorBB){
     exit(1);
   }
+
+  // In the end, there is only one dominator basic block
   return DominatorBB;
 }
 
 
 void filter_target(){
   errs() << "filter targets...\n";
+  std::cout << "filter targets...\n" << std::endl;
+  // targets_llvm_func is from result of loadTargets
   for (auto func: targets_llvm_func){
+    std::cout << "Processing function: " << func->getName().str() << std::endl;
+    
     const BasicBlock *dominatorBB = getDominatorBB(func, targets_llvm_func_bbs[func]);
+    // Each function has only one dominator basic block
     targets_DT_bb.insert(dominatorBB);
 
+    errs() << "In the for loop targets_llvm_func_bbs\n";
     for(auto origBB: targets_llvm_func_bbs[func]){
+      // Assign the dominator basic block to the original basic block
       origBB2DTBB[origBB] = dominatorBB;
+    }
+
+    // Debug - print out origBB2DTBB
+    for (auto bb = origBB2DTBB.begin(); bb != origBB2DTBB.end(); bb++) {
+      errs() << "origBB2DTBB: ";
+      bb->first->printAsOperand(errs(), false);
+      errs() << " -> ";
+      bb->second->printAsOperand(errs(), false);
+      errs() << "\n";
+      
     }
   }
 
   int i = 0;
   for (auto it = targets_DT_bb.begin(); it != targets_DT_bb.end(); ) {
       i++;
-      if (i >= TARGETS_NUM) {
+      if (i >= TARGETS_NUM) { // TARGETS_NUM is a constant (default value is 10)
           errs() << "target too many!, delete over target\n";
           it = targets_DT_bb.erase(it); 
       } else {
@@ -986,11 +1177,22 @@ void filter_target(){
 
   targets_DT_bb_num = i;
   targets_DT_bb_num_orig = targets_DT_bb_orig.size();
+  errs() << "targets_DT_bb_num: " << targets_DT_bb_num << "\n";
 }
 
 
 
 std::vector<NodeID> loadTargets(std::string filename) {
+  /* Load the target file
+    eventually return a vector of ICFG NodeIDs (result).
+
+    Each node in the result contains at least one type of VFGNode (e.g., StoreVFGNode, CopyVFGNode, CmpVFGNode, BinaryOPVFGNode, UnaryOPVFGNode).
+    This ID can use used to fetch the correspoding information such as 
+    - function name
+    - basic block
+    - instruction
+  */
+
   // 1. read the target file
   ifstream inFile(filename);
 	if (!inFile) {
@@ -1036,9 +1238,6 @@ std::vector<NodeID> loadTargets(std::string filename) {
       auto idx = file_name.find(TargetFileName);
       // auto idx = file_name.find(target.first); // This doesn't work because target.first is the full path...
       if (idx != string::npos) {
-        // Debug info for the function is available and its fine name
-        // matches the target file name
-        std::cout << "Function: " << fun->getName().str() << " File: " << file_name << std::endl;
 				flag = true;
 				break;
 			}
@@ -1047,8 +1246,6 @@ std::vector<NodeID> loadTargets(std::string filename) {
 		if (!flag)
 			continue;
 
-    // Debug function name
-    std::cout << "### Current Function (passed target matching): " << fun->getName().str() << "###" << std::endl;
     
      // Inner loop (1): Iterate through all "basic blocks" in the current function.
     for (Function::const_iterator bit = fun->begin(), ebit = fun->end(); bit != ebit; ++bit) {
@@ -1064,7 +1261,6 @@ std::vector<NodeID> loadTargets(std::string filename) {
         std::string inst_str;
         llvm::raw_string_ostream rso(inst_str);
         inst->print(rso);
-        std::cout << "Instruction: " << inst_str << " SourceLoc: " << str << std::endl;
 
           // 4. Target Matching:
           // Skip alloca instructions (they are not relevant for our targets).
@@ -1077,31 +1273,45 @@ std::vector<NodeID> loadTargets(std::string filename) {
 						line_num = Loc->getLine();
             Filename = Loc->getFilename().str();
 					}
-					
+
           // Iterate through the targets read from the file.
 					for (auto target : targets) {
             // Check if the current instruction's filename contains the target function name.
             // The (idx == 0 || Filename[idx-1]=='/') part ensures that we match the whole function name
             // and not just a part of it (e.g., we want to match "foo", not "myfoo").
             std::string TargetFileName = llvm::sys::path::filename(target.first).str();
-            std::cout << "Filename: " << Filename << " Target: " << target.first << std::endl;
-            std::cout << "idx: " << Filename.find(TargetFileName) << std::endl;
             auto idx = Filename.find(TargetFileName);
 						//auto idx = Filename.find(target.first);
 						if (idx != string::npos && (idx == 0 || Filename[idx-1]=='/')) {
+              // Check if the current instruction's line number matches the target line number.
+              // Only process the instruction that matches the target line number (i.e., exact line of code changed by the commit)
 							if ((target.second == line_num) ) {
+                // 5. Identifying and Storing Targets:
+                // Get the VFG nodes associated with this instruction.
                 std::list<const VFGNode *> TempVFGNodes = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(inst))->getVFGNodes();
 
                 // only search for StoreVFGNode
+                // Filter out VFG nodes that are not relevant to our analysis. We only keep nodes related to data flow.
                 std::list<const VFGNode *>::iterator it = TempVFGNodes.begin();
                 while (it != TempVFGNodes.end()) {
+
+                  // Using dyn_cast to check if the VFG node belongs to one of the following types:StoreVFGNode, CopyVFGNode, CmpVFGNode, BinaryOPVFGNode, UnaryOPVFGNode.
+                  // If a node is not one of these types, we remove it from the list.
                   if (!dyn_cast<const StoreVFGNode>(*it) && !dyn_cast<const CopyVFGNode>(*it) && !dyn_cast<const CmpVFGNode>(*it) && !dyn_cast<const BinaryOPVFGNode>(*it) && !dyn_cast<const UnaryOPVFGNode>(*it)) {
                     it = TempVFGNodes.erase(it); 
                   }else{
                     ++it;
+                    // Print out the basic block that contains the current matched instruction.
+                    errs() << "Basic Block containing the matched instruction: ";
+                    bb->printAsOperand(errs(), false);
+                    errs() << "\n";
+
+                    // Insert the current basic block into 'targets_DT_bb_orig'.
+                    // this basic block contains the instruction that matches the target and one of the VFG nodes is a StoreVFGNode, CopyVFGNode, CmpVFGNode, BinaryOPVFGNode, or UnaryOPVFGNode.
                     targets_DT_bb_orig.insert(bb);
                     NodeID id = icfg->getICFGNode(LLVMModuleSet::getLLVMModuleSet()->getSVFInstruction(inst))->getId();
-                    result.push_back(id);
+                    result.push_back(id); // Add the ICFG node ID to the 'result' vector.
+                    // the result only has instructions that match the target and one of the VFG nodes is a StoreVFGNode, CopyVFGNode, CmpVFGNode, BinaryOPVFGNode, or UnaryOPVFGNode.
                   }
                 }
                 VFGNodes.splice(VFGNodes.end(), TempVFGNodes);
@@ -1119,14 +1329,33 @@ std::vector<NodeID> loadTargets(std::string filename) {
     const BasicBlock *bb = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
     const Function *func = bb->getParent();
 
+    // If bb is already in targets_llvm_bb, nothing changes bacause the set is unique
     targets_llvm_bb.insert(bb);
+    // If func is already in targets_llvm_func, nothing changes bacause the set is unique
     targets_llvm_func.insert(func);
+    // If bb is already in targets_llvm_func_bbs[func], nothing changes bacause the set is unique
     targets_llvm_func_bbs[func].insert(bb);
   }
 
   filter_target();
 
-	return result;
+  // Debug - print out the content of targets_llvm_func_bbs
+  std::cout << "--- Printing targets_llvm_func_bbs ---" << std::endl;
+  for (auto it = targets_llvm_func_bbs.begin(); it != targets_llvm_func_bbs.end(); ++it) {
+    const Function *func = it->first;
+    std::cout << "Function: " << func->getName().str() << std::endl;
+    std::cout << "Basic blocks in the function: " << std::endl;
+    for (auto bb : it->second) {
+      // std::cout << "  Basic Block: " << bb << std::endl;
+      // std::cout << "Hello!\n" << std::endl;
+      // Create a raw_os_ostream that writes to std::cout
+      llvm::raw_os_ostream cout_stream(std::cout); 
+      bb->printAsOperand(cout_stream, false);
+      cout_stream << "\n"; //
+    }
+  }
+
+	return result; // Result is a vector of ICFG NodeIDs (i.e., target_ids)
 }
 
 static void buildBranchInfo(std::vector<NodeID> target_ids){
