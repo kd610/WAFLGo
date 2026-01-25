@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <ctime>
+#include <cstdlib>
 
 #include <stack>
 #include <regex>
@@ -30,12 +31,34 @@ using namespace std;
 #define SUF_NUM             500 
 #define SUF_NUM_CFG         50000 
 #define PRE_NUM_CFG         50000
-#define TARGETS_NUM         10 
+#define TARGETS_NUM         200
 #define TARGETS_NUM_ORIG         32 
 
 static llvm::cl::opt<std::string> InputFilename(cl::Positional,
         llvm::cl::desc("<input bitcode>"), llvm::cl::init("-"));
 static llvm::cl::opt<std::string> TargetsFile("targets", llvm::cl::desc("specify targes file"), llvm::cl::Required);
+
+static bool isTraceEnabled() {
+  static int cached = -1;
+  if (cached == -1) {
+    const char *env = std::getenv("WAFLGO_CBI_TRACE");
+    cached = (env && *env && std::string(env) != "0") ? 1 : 0;
+  }
+  return cached == 1;
+}
+
+static const ActualRetVFGNode *findActualRetVFGNodeSafe(const RetICFGNode *retNode) {
+  if (!retNode) {
+    return nullptr;
+  }
+  std::list<const VFGNode *> nodes = retNode->getVFGNodes();
+  for (const VFGNode *node : nodes) {
+    if (const ActualRetVFGNode *aret = dyn_cast<ActualRetVFGNode>(node)) {
+      return aret;
+    }
+  }
+  return nullptr;
+}
 
 
 std::set<const BasicBlock*> targets_llvm_bb;
@@ -671,9 +694,15 @@ void findTargetControl(std::vector<NodeID> x){
 }
 
 SVFGNode * SVFVar2SVFNode(const SVFVar *Var){
+  if (!svfg || !Var) {
+    return nullptr;
+  }
   const SVFValue *val = Var->getValue();
+  if (!val) {
+    return nullptr;
+  }
   uint32_t totalNodeNum = svfg->getTotalNodeNum();
-  SVF::SVFGNode *vNode;
+  SVF::SVFGNode *vNode = nullptr;
   for (uint32_t i = 0; i < totalNodeNum; i++)
   {
     if (!svfg->hasSVFGNode(i))
@@ -682,13 +711,16 @@ SVFGNode * SVFVar2SVFNode(const SVFVar *Var){
       break;
     }
     vNode = svfg->getSVFGNode(i);
+    if (!vNode) {
+      continue;
+    }
     if (vNode->getValue() == val)
     {
-      break;
+      return vNode;
     }
   }
 
-  return vNode;
+  return nullptr;
 }
 
 bool isBlacklisted(const SVFVar * Var ) {
@@ -732,11 +764,40 @@ bool isBlacklisted(const SVFVar * Var ) {
 }
 
 void findTargetUse(SVFG *svfg, int num){
+  if (!svfg) {
+    return;
+  }
     FIFOWorkList<const VFGNode *> worklist;
     set<const VFGNode*> visited;
+    static uint64_t missingActualRetWarns = 0;
+
+  if (isTraceEnabled()) {
+    errs() << "[WAFLGO_CBI_TRACE] findTargetUse: VFGNodes=" << VFGNodes.size() << "\n";
+  }
 
   for(auto val : VFGNodes){
-    SVFGNode *vNode = (SVFGNode *)val;
+    if (!val) {
+      continue;
+    }
+    const ICFGNode* iNode = val->getICFGNode();
+    if (!iNode) {
+      continue;
+    }
+    const SVFBasicBlock *svfbb = iNode->getBB();
+    if (!svfbb) {
+      continue;
+    }
+    const Value *llvm_bb = LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb);
+    const BasicBlock *BB_target = dyn_cast_or_null<BasicBlock>(llvm_bb);
+    if (!BB_target) {
+      continue;
+    }
+    auto bb_it = BB_IDs.find(BB_target);
+    if (bb_it == BB_IDs.end()) {
+      continue;
+    }
+
+    const VFGNode *vNode = val;
     bool sufFlag = 1;   
     if(visited.find(vNode)!=visited.end()){
       ;
@@ -746,10 +807,7 @@ void findTargetUse(SVFG *svfg, int num){
 
     worklist.push(vNode);
 
-    const ICFGNode* iNode = val->getICFGNode();
-    const SVFBasicBlock *svfbb = iNode->getBB();
-    const BasicBlock *BB_target = cast<const BasicBlock>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(svfbb));
-    uint32_t taget_bb_id = BB_IDs[BB_target];
+    uint32_t taget_bb_id = bb_it->second;
 
     std::set<const BasicBlock*> tmp_suf_bbs;
     set<FunEntryICFGNode *> callee;
@@ -759,10 +817,16 @@ void findTargetUse(SVFG *svfg, int num){
     while(!worklist.empty() && sufFlag && (suf_num<SUF_NUM)){
       suf_num++;
       const VFGNode *treeNode = worklist.pop();
+      if (!treeNode) {
+        continue;
+      }
       
       visited.insert(treeNode);
       if(const ActualParmVFGNode* AParmNode=dyn_cast<ActualParmVFGNode>(treeNode)){
           const CallICFGNode *callNode = AParmNode->getCallSite();
+          if (!callNode) {
+            continue;
+          }
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
                                                                           callNode->OutEdgeEnd();
             it != eit; ++it)
@@ -774,10 +838,15 @@ void findTargetUse(SVFG *svfg, int num){
           NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
           for (auto nodeid : AOUTNodeSet)
           {
-            worklist.push(svfg->getSVFGNode(nodeid));
+            if (const VFGNode *node = svfg->getSVFGNode(nodeid)) {
+              worklist.push(node);
+            }
           }
 
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
+          if (!RetNode) {
+            continue;
+          }
           const SVFVar *Var = RetNode->getActualRet();
           if(Var ==NULL){
             continue;
@@ -785,15 +854,23 @@ void findTargetUse(SVFG *svfg, int num){
           
           const SVFValue *val = Var->getValue();
           if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
+            if (const VFGNode *svfgNode = SVFVar2SVFNode(Var)) {
+              worklist.push(svfgNode);
+            }
           }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+            const ActualRetVFGNode *ARetNode = findActualRetVFGNodeSafe(RetNode);
+            if (ARetNode) {
+              worklist.push(ARetNode);
+            } else if (isTraceEnabled() && missingActualRetWarns++ < 20) {
+              errs() << "[WAFLGO_CBI_TRACE] missing ActualRetVFGNode for callsite (treeNode ActualParm)\n";
+            }
           }
           
       }else if(const ActualINSVFGNode * AINNode = dyn_cast<ActualINSVFGNode>(treeNode)){
           const CallICFGNode *callNode = AINNode->getCallSite();
+          if (!callNode) {
+            continue;
+          }
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
                                                                           callNode->OutEdgeEnd();
             it != eit; ++it)
@@ -806,21 +883,31 @@ void findTargetUse(SVFG *svfg, int num){
 
           NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
           for(auto nodeid : AOUTNodeSet){
-            worklist.push(svfg->getSVFGNode(nodeid));
+            if (const VFGNode *node = svfg->getSVFGNode(nodeid)) {
+              worklist.push(node);
+            }
           }
           
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
+          if (!RetNode) {
+            continue;
+          }
           const SVFVar *Var = RetNode->getActualRet();
           if(Var ==NULL){
             continue;
           }
           const SVFValue *val = Var->getValue();
           if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
+            if (const VFGNode *svfgNode = SVFVar2SVFNode(Var)) {
+              worklist.push(svfgNode);
+            }
           }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+            const ActualRetVFGNode *ARetNode = findActualRetVFGNodeSafe(RetNode);
+            if (ARetNode) {
+              worklist.push(ARetNode);
+            } else if (isTraceEnabled() && missingActualRetWarns++ < 20) {
+              errs() << "[WAFLGO_CBI_TRACE] missing ActualRetVFGNode for callsite (treeNode ActualIN)\n";
+            }
           }
       }
       for (VFGNode::const_iterator it = treeNode->OutEdgeBegin(), eit = treeNode->OutEdgeEnd();
@@ -833,6 +920,9 @@ void findTargetUse(SVFG *svfg, int num){
         }
         if(ActualParmVFGNode* AParmNode=dyn_cast<ActualParmVFGNode>(sufNode)){
           const CallICFGNode *callNode = AParmNode->getCallSite();
+          if (!callNode) {
+            continue;
+          }
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
                                                                           callNode->OutEdgeEnd();
             it != eit; ++it)
@@ -844,21 +934,31 @@ void findTargetUse(SVFG *svfg, int num){
                
             NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
             for(auto nodeid : AOUTNodeSet){
-              worklist.push(svfg->getSVFGNode(nodeid));
+              if (const VFGNode *node = svfg->getSVFGNode(nodeid)) {
+                worklist.push(node);
+              }
             }
 
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
+          if (!RetNode) {
+            continue;
+          }
           const SVFVar *Var = RetNode->getActualRet();
           if(Var ==NULL){
             continue;
           }
           const SVFValue *SVFval = Var->getValue();
           if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
+            if (const VFGNode *svfgNode = SVFVar2SVFNode(Var)) {
+              worklist.push(svfgNode);
+            }
           }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+            const ActualRetVFGNode *ARetNode = findActualRetVFGNodeSafe(RetNode);
+            if (ARetNode) {
+              worklist.push(ARetNode);
+            } else if (isTraceEnabled() && missingActualRetWarns++ < 20) {
+              errs() << "[WAFLGO_CBI_TRACE] missing ActualRetVFGNode for callsite (sufNode ActualParm)\n";
+            }
           }
         }else if(FormalRetVFGNode * FRetNode = dyn_cast<FormalRetVFGNode>(sufNode)){
           FunEntryICFGNode *funEntryNode = icfg->getFunEntryICFGNode(FRetNode->getFun());
@@ -867,6 +967,9 @@ void findTargetUse(SVFG *svfg, int num){
           }
         }else if(ActualINSVFGNode * AINNode = dyn_cast<ActualINSVFGNode>(sufNode)){
           const CallICFGNode *callNode = AINNode->getCallSite();
+          if (!callNode) {
+            continue;
+          }
           for(ICFGNode::const_iterator it = callNode->OutEdgeBegin(), eit =
                                                                           callNode->OutEdgeEnd();
             it != eit; ++it)
@@ -877,21 +980,31 @@ void findTargetUse(SVFG *svfg, int num){
           }
           NodeBS &AOUTNodeSet = svfg->getActualOUTSVFGNodes(callNode);
           for(auto nodeid : AOUTNodeSet){
-            worklist.push(svfg->getSVFGNode(nodeid));
+            if (const VFGNode *node = svfg->getSVFGNode(nodeid)) {
+              worklist.push(node);
+            }
           }
           
           const RetICFGNode *RetNode = callNode->getRetICFGNode();
+          if (!RetNode) {
+            continue;
+          }
           const SVFVar *Var = RetNode->getActualRet();
           if(Var ==NULL){
             continue;
           }
           const SVFValue *val = Var->getValue();
           if(isBlacklisted(Var)){
-            SVFGNode *svfgNode = SVFVar2SVFNode(Var);
-            worklist.push(svfgNode);
+            if (const VFGNode *svfgNode = SVFVar2SVFNode(Var)) {
+              worklist.push(svfgNode);
+            }
           }else{
-            const ActualRetVFGNode *ARetNode = svfg->getActualRetVFGNode(Var);
-            worklist.push(ARetNode);
+            const ActualRetVFGNode *ARetNode = findActualRetVFGNodeSafe(RetNode);
+            if (ARetNode) {
+              worklist.push(ARetNode);
+            } else if (isTraceEnabled() && missingActualRetWarns++ < 20) {
+              errs() << "[WAFLGO_CBI_TRACE] missing ActualRetVFGNode for callsite (sufNode ActualIN)\n";
+            }
           }
 
         }else if(FormalOUTSVFGNode * FOUTNode=dyn_cast<FormalOUTSVFGNode>(sufNode)){
@@ -905,6 +1018,7 @@ void findTargetUse(SVFG *svfg, int num){
     }
 
     if(sufFlag){
+      static uint64_t nonInstructionWarns = 0;
       for(auto it = visited.begin(), eit = visited.end(); it!=eit; ++it)
       {
         const VFGNode *node = *it;
@@ -913,7 +1027,15 @@ void findTargetUse(SVFG *svfg, int num){
           if(stmtNode->getInst() == nullptr){
             continue;
           }
-          const Instruction *inst = cast<const Instruction>(LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(stmtNode->getInst()));
+          const Value *llvmVal = LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(stmtNode->getInst());
+          const Instruction *inst = dyn_cast_or_null<Instruction>(llvmVal);
+          if (!inst) {
+            if (isTraceEnabled() && nonInstructionWarns++ < 20) {
+              errs() << "[WAFLGO_CBI_TRACE] findTargetUse: non-Instruction llvmVal from stmtNode->getInst(); llvmVal="
+                     << (llvmVal ? llvmVal->getValueID() : -1) << "\n";
+            }
+            continue;
+          }
           
           if (inst)
           {

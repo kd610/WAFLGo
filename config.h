@@ -327,8 +327,8 @@
 #define MAP_SIZE_POW2       16
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
 
-#define TARGETS_NUM         10 
-#define TARGETS_NUM_ORIG         32 
+#define TARGETS_NUM         200
+#define TARGETS_NUM_ORIG         32
 
 /* Maximum allocator request size (keep well under INT_MAX): */
 
